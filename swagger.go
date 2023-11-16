@@ -9,10 +9,38 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"sync"
 )
+
+type swaggerConfig struct {
+	URLs                     []string
+	DocExpansion             string
+	Title                    string
+	Oauth2RedirectURL        template.JS
+	DefaultModelsExpandDepth int
+	DeepLinking              bool
+	PersistAuthorization     bool
+	Oauth2DefaultClientID    string
+}
+
+func (config Config) toSwaggerConfig() swaggerConfig {
+	return swaggerConfig{
+		URLs:                     config.URLs,
+		DeepLinking:              config.DeepLinking,
+		DocExpansion:             config.DocExpansion,
+		DefaultModelsExpandDepth: config.DefaultModelsExpandDepth,
+		Oauth2RedirectURL: "`${window.location.protocol}//${window.location.host}$" +
+			"{window.location.pathname.split('/').slice(0, window.location.pathname.split('/').length - 1).join('/')}" +
+			"/oauth2-redirect.html`",
+		Title:                 config.Title,
+		PersistAuthorization:  config.PersistAuthorization,
+		Oauth2DefaultClientID: config.Oauth2DefaultClientID,
+	}
+}
 
 type Config struct {
 	URLs                 []string
+	Title                string
 	DocExpansion         string
 	DomID                string
 	InstanceName         string
@@ -20,6 +48,9 @@ type Config struct {
 	PersistAuthorization bool
 	SyntaxHighlight      bool
 
+	DefaultModelsExpandDepth int
+
+	Oauth2DefaultClientID string
 	// The information for OAuth2 integration, if any.
 	OAuth *OAuthConfig
 }
@@ -101,13 +132,14 @@ func OAuth(config *OAuthConfig) func(*Config) {
 
 func newConfig(configFns ...func(*Config)) *Config {
 	config := Config{
-		URLs:                 []string{"doc.json", "doc.yaml"},
-		DocExpansion:         "list",
-		DomID:                "swagger-ui",
-		InstanceName:         "swagger",
-		DeepLinking:          true,
-		PersistAuthorization: false,
-		SyntaxHighlight:      true,
+		URLs:                     []string{"doc.json", "doc.yaml"},
+		DocExpansion:             "list",
+		InstanceName:             swag.Name,
+		Title:                    "Swagger UI",
+		DefaultModelsExpandDepth: -1,
+		DeepLinking:              true,
+		PersistAuthorization:     false,
+		Oauth2DefaultClientID:    "",
 	}
 
 	for _, fn := range configFns {
@@ -122,45 +154,58 @@ func newConfig(configFns ...func(*Config)) *Config {
 }
 
 func CustomWrapHandler(handler *webdav.Handler, options ...func(*Config)) gin.HandlerFunc {
+	var once sync.Once
+
 	config := newConfig(options...)
 
-	// create a template with name
+	if config.InstanceName == "" {
+		config.InstanceName = swag.Name
+	}
+
+	if config.Title == "" {
+		config.Title = "Swagger UI"
+	}
+
 	index, _ := template.New("swagger_index.html").Parse(indexTemplate)
 
-	var re = regexp.MustCompile(`^(.*/)([^?].*)?[?|.]*$`)
+	var re = regexp.MustCompile(`(.*)(index\.html|doc\.json|favicon-16x16\.png|favicon-32x32\.png|/oauth2-redirect\.html|swagger-ui\.css|swagger-ui\.css\.map|swagger-ui\.js|swagger-ui\.js\.map|swagger-ui-bundle\.js|swagger-ui-bundle\.js\.map|swagger-ui-standalone-preset\.js|swagger-ui-standalone-preset\.js\.map)[?|.]*`)
 
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet {
+			c.AbortWithStatus(http.StatusMethodNotAllowed)
 		}
 
 		matches := re.FindStringSubmatch(c.Request.RequestURI)
+
+		if len(matches) != 3 {
+			c.String(http.StatusNotFound, http.StatusText(http.StatusNotFound))
+
+			return
+		}
+
 		path := matches[2]
+		once.Do(func() {
+			handler.Prefix = matches[1]
+		})
 
 		switch filepath.Ext(path) {
 		case ".html":
-			c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+			c.Header("Content-Type", "text/html; charset=utf-8")
 		case ".css":
-			c.Writer.Header().Set("Content-Type", "text/css; charset=utf-8")
+			c.Header("Content-Type", "text/css; charset=utf-8")
 		case ".js":
-			c.Writer.Header().Set("Content-Type", "application/javascript")
-		case ".json":
-			c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-		case ".yaml":
-			c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			c.Header("Content-Type", "application/javascript")
 		case ".png":
-			c.Writer.Header().Set("Content-Type", "image/png")
-		}
-
-		response := c.Writer
-		if _, ok := response.(http.Flusher); ok {
-			defer response.Flush()
+			c.Header("Content-Type", "image/png")
+		case ".json":
+			c.Header("Content-Type", "application/json; charset=utf-8")
 		}
 
 		switch path {
 		case "":
 			c.Redirect(http.StatusMovedPermanently, matches[1]+"/"+"index.html")
 		case "index.html":
-			_ = index.Execute(c.Writer, config)
+			_ = index.Execute(c.Writer, config.toSwaggerConfig())
 		case "doc.json":
 			doc, err := swag.ReadDoc(config.InstanceName)
 			if err != nil {
@@ -169,7 +214,7 @@ func CustomWrapHandler(handler *webdav.Handler, options ...func(*Config)) gin.Ha
 				return
 			}
 
-			_, _ = c.Writer.Write([]byte(doc))
+			c.String(http.StatusOK, doc)
 		case "doc.yaml":
 			jsonString, err := swag.ReadDoc(config.InstanceName)
 			if err != nil {
@@ -183,9 +228,9 @@ func CustomWrapHandler(handler *webdav.Handler, options ...func(*Config)) gin.Ha
 
 				return
 			}
-			_, _ = c.Writer.Write(doc)
+			c.String(http.StatusOK, string(doc))
 		default:
-			c.Request.URL.Path = matches[2]
+			//c.Request.URL.Path = matches[2]
 			handler.ServeHTTP(c.Writer, c.Request)
 		}
 
@@ -198,7 +243,7 @@ const indexTemplate = `<!-- HTML for static distribution bundle build -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Swagger UI</title>
+  <title>{{.Title}}</title>
   <link rel="stylesheet" type="text/css" href="./swagger-ui.css" >
   <link rel="icon" type="image/png" href="./favicon-32x32.png" sizes="32x32" />
   <link rel="icon" type="image/png" href="./favicon-16x16.png" sizes="16x16" />
@@ -259,7 +304,7 @@ const indexTemplate = `<!-- HTML for static distribution bundle build -->
   </defs>
 </svg>
 
-<div id="{{.DomID}}"></div>
+<div id="swagger-ui"></div>
 
 <script src="./swagger-ui-bundle.js"> </script>
 <script src="./swagger-ui-standalone-preset.js"> </script>
@@ -267,7 +312,7 @@ const indexTemplate = `<!-- HTML for static distribution bundle build -->
 window.onload = function() {
   // Build a system
   const ui = SwaggerUIBundle({
-	urls: [
+    urls: [
 	{{range $index, $url := .URLs}}
 		{
 			name: "{{$url}}",
@@ -275,12 +320,10 @@ window.onload = function() {
 		},
 	{{end}}
 	],
-    syntaxHighlight: {{.SyntaxHighlight}},
-    deepLinking: {{.DeepLinking}},
-    docExpansion: "{{.DocExpansion}}",
-    persistAuthorization: {{.PersistAuthorization}},
-    dom_id: "#{{.DomID}}",
+    dom_id: '#swagger-ui',
     validatorUrl: null,
+    oauth2RedirectUrl: {{.Oauth2RedirectURL}},
+    persistAuthorization: {{.PersistAuthorization}},
     presets: [
       SwaggerUIBundle.presets.apis,
       SwaggerUIStandalonePreset
@@ -288,16 +331,18 @@ window.onload = function() {
     plugins: [
       SwaggerUIBundle.plugins.DownloadUrl
     ],
-    layout: "StandaloneLayout"
+	layout: "StandaloneLayout",
+    docExpansion: "{{.DocExpansion}}",
+	deepLinking: {{.DeepLinking}},
+	defaultModelsExpandDepth: {{.DefaultModelsExpandDepth}}
   })
 
-  {{if .OAuth}}
-  ui.initOAuth({
-    clientId: "{{.OAuth.ClientId}}",
-    realm: "{{.OAuth.Realm}}",
-    appName: "{{.OAuth.AppName}}"
-  })
-  {{end}}
+  const defaultClientId = "{{.Oauth2DefaultClientID}}";
+  if (defaultClientId) {
+    ui.initOAuth({
+      clientId: defaultClientId
+    })
+  }
 
   window.ui = ui
 }
