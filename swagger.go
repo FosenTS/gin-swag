@@ -136,7 +136,7 @@ func newConfig(configFns ...func(*Config)) *Config {
 		DocExpansion:             "list",
 		InstanceName:             swag.Name,
 		Title:                    "Swagger UI",
-		DefaultModelsExpandDepth: -1,
+		DefaultModelsExpandDepth: 1,
 		DeepLinking:              true,
 		PersistAuthorization:     false,
 		Oauth2DefaultClientID:    "",
