@@ -1,4 +1,4 @@
-package gin_swag
+package ginswag
 
 import (
 	"github.com/ghodss/yaml"
