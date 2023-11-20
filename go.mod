@@ -1,4 +1,4 @@
-module gin-swag
+module github.com/FosenTS/gin-swag
 
 go 1.21.3
 
